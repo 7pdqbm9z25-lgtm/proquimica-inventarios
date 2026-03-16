@@ -1,0 +1,248 @@
+import { useState, useRef, useEffect } from "react";
+import Papa from "papaparse";
+
+function now() {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function WhatsAppBubble({ msg }) {
+  const isBot = msg.from === "bot";
+  return (
+    <div style={{ display: "flex", justifyContent: isBot ? "flex-start" : "flex-end", marginBottom: 8 }}>
+      {isBot && (
+        <div style={{ width: 30, height: 30, borderRadius: "50%", background: "#25D366", display: "flex", alignItems: "center", justifyContent: "center", marginRight: 6, flexShrink: 0, fontSize: 14, color: "#fff", fontWeight: 500 }}>P</div>
+      )}
+      <div style={{
+        maxWidth: "75%", padding: "8px 12px",
+        borderRadius: isBot ? "0 12px 12px 12px" : "12px 0 12px 12px",
+        background: isBot ? "#fff" : "#DCF8C6",
+        border: "0.5px solid #e0e0e0",
+        fontSize: 13, lineHeight: 1.5, color: "#111"
+      }}>
+        <div style={{ whiteSpace: "pre-wrap" }}>{msg.text}</div>
+        <div style={{ fontSize: 11, color: "#888", textAlign: "right", marginTop: 3 }}>{msg.time}</div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [tab, setTab] = useState("chat");
+  const [inventory, setInventory] = useState([]);
+  const [columns, setColumns] = useState([]);
+  const [messages, setMessages] = useState([
+    { from: "bot", text: "Hola! Soy el asistente de inventario Proquimica.\n\nPara comenzar, sube tu archivo CSV o Excel con el boton \"Subir archivo\".\n\nLuego podras preguntarme por cualquier producto, SKU o categoria.", time: now() }
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const [fileName, setFileName] = useState("Sin inventario cargado");
+  const [uploadError, setUploadError] = useState("");
+  const [saveStatus, setSaveStatus] = useState("");
+  const chatEndRef = useRef(null);
+  const fileRef = useRef(null);
+
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("proquimica-inventory") || "null");
+      if (saved && Array.isArray(saved.data) && saved.data.length > 0) {
+        setInventory(saved.data);
+        setColumns(saved.columns || Object.keys(saved.data[0]));
+        setFileName((saved.fileName || "Inventario") + " (guardado)");
+      }
+    } catch { }
+  }, []);
+
+  function saveInventory(data, cols, name) {
+    try {
+      localStorage.setItem("proquimica-inventory", JSON.stringify({ data, columns: cols, fileName: name }));
+      setSaveStatus("Guardado");
+    } catch { setSaveStatus("Error al guardar"); }
+    setTimeout(() => setSaveStatus(""), 3000);
+  }
+
+  function clearInventory() {
+    localStorage.removeItem("proquimica-inventory");
+    setInventory([]);
+    setColumns([]);
+    setFileName("Sin inventario cargado");
+    setSaveStatus("Inventario limpiado");
+    setTimeout(() => setSaveStatus(""), 3000);
+  }
+
+  function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploadError("");
+
+    const processData = (data) => {
+      if (!Array.isArray(data) || data.length === 0) {
+        setUploadError("El archivo parece estar vacio.");
+        return;
+      }
+      const cols = Object.keys(data[0]);
+      const name = `${file.name} — ${data.length} productos`;
+      setInventory(data);
+      setColumns(cols);
+      setFileName(name);
+      setTab("inventory");
+      saveInventory(data, cols, name);
+    };
+
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (ext === "csv") {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const result = Papa.parse(evt.target.result, {
+          header: true, skipEmptyLines: true, dynamicTyping: true,
+          delimitersToGuess: [",", ";", "\t", "|"],
+        });
+        processData(result.data);
+      };
+      reader.readAsText(file);
+    } else {
+      setUploadError("Por favor sube el archivo en formato CSV.");
+    }
+    e.target.value = "";
+  }
+
+  async function sendMessage() {
+    if (!input.trim() || loading) return;
+    if (inventory.length === 0) {
+      setMessages(m => [...m, { from: "bot", text: "Primero sube un archivo de inventario usando el boton \"Subir archivo\".", time: now() }]);
+      setInput("");
+      return;
+    }
+    const userMsg = { from: "user", text: input.trim(), time: now() };
+    setMessages(m => [...m, userMsg]);
+    const q = input.trim();
+    setInput("");
+    setLoading(true);
+
+    const normalize = s => String(s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const qNorm = normalize(q);
+    const keywords = qNorm.split(/\s+/).filter(w => w.length > 1);
+    const scored = inventory.map(row => {
+      const rowText = Object.values(row).map(normalize).join(" ");
+      const matchCount = keywords.filter(kw => rowText.includes(kw)).length;
+      return { row, matchCount };
+    }).filter(x => x.matchCount > 0).sort((a, b) => b.matchCount - a.matchCount);
+
+    const subset = (scored.length > 0 ? scored.map(x => x.row) : inventory).slice(0, 500);
+    const invSummary = subset.map(p => JSON.stringify(p)).join("\n");
+
+    const prompt = `Eres un asistente de inventario de bodega de Proquimica. Responde en español de forma concisa y amigable.
+Inventario filtrado por relevancia (columnas: ${columns.join(", ")}):
+${invSummary}
+Total en inventario: ${inventory.length} productos.
+
+El usuario pregunta: "${q}"
+
+Si encuentras el producto, muestra: nombre/descripcion, SKU (si existe), cantidad/stock, precio (si existe), y ubicacion (si existe).
+Si hay varios resultados, listalos brevemente.
+Si no encuentras nada, dilo amablemente.
+Responde de forma directa, sin markdown innecesario.`;
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, messages: [{ role: "user", content: prompt }] })
+      });
+      const data = await res.json();
+      const text = data.content?.[0]?.text || "No pude procesar tu consulta.";
+      setMessages(m => [...m, { from: "bot", text, time: now() }]);
+    } catch {
+      setMessages(m => [...m, { from: "bot", text: "Error de conexion. Intenta de nuevo.", time: now() }]);
+    }
+    setLoading(false);
+  }
+
+  const normalize = s => String(s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const filtered = inventory.filter(row =>
+    search.trim() === "" || Object.values(row).some(v => normalize(v).includes(normalize(search)))
+  );
+
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 800, margin: "0 auto", padding: "1rem" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <div style={{ width: 40, height: 40, borderRadius: "50%", background: "#25D366", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 500, fontSize: 16 }}>P</div>
+        <div>
+          <div style={{ fontWeight: 500, fontSize: 15 }}>Proquimica Inventarios</div>
+          <div style={{ fontSize: 12, color: "#888" }}>{fileName}</div>
+        </div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+          {saveStatus && <span style={{ fontSize: 12, color: "#25D366" }}>{saveStatus}</span>}
+          {inventory.length > 0 && (
+            <button onClick={() => saveInventory(inventory, columns, fileName)} style={{ fontSize: 13, padding: "6px 14px", borderRadius: 8, border: "0.5px solid #ccc", background: "transparent", cursor: "pointer" }}>Guardar</button>
+          )}
+          <button onClick={() => fileRef.current.click()} style={{ fontSize: 13, padding: "6px 14px", borderRadius: 8, border: "0.5px solid #ccc", background: "transparent", cursor: "pointer" }}>Subir archivo</button>
+          <input ref={fileRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleFile} />
+        </div>
+      </div>
+
+      {uploadError && <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 8, background: "#fff0f0", color: "#c00", fontSize: 13 }}>{uploadError}</div>}
+
+      <div style={{ display: "flex", borderBottom: "0.5px solid #e0e0e0", marginBottom: 16 }}>
+        {["chat", "inventory"].map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{ padding: "8px 20px", fontSize: 13, border: "none", background: "transparent", cursor: "pointer", color: tab === t ? "#111" : "#888", borderBottom: tab === t ? "2px solid #111" : "2px solid transparent", fontWeight: tab === t ? 500 : 400 }}>
+            {t === "chat" ? "Consulta" : `Inventario (${inventory.length})`}
+          </button>
+        ))}
+        {inventory.length > 0 && (
+          <button onClick={clearInventory} style={{ marginLeft: "auto", fontSize: 12, padding: "6px 10px", border: "none", background: "transparent", cursor: "pointer", color: "#aaa" }}>Limpiar</button>
+        )}
+      </div>
+
+      {tab === "chat" && (
+        <div style={{ background: "#ECE5DD", borderRadius: 12, overflow: "hidden", border: "0.5px solid #ddd" }}>
+          <div style={{ background: "#075E54", padding: "10px 16px", display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 36, height: 36, borderRadius: "50%", background: "#25D366", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 500 }}>P</div>
+            <div>
+              <div style={{ color: "#fff", fontWeight: 500, fontSize: 14 }}>Proquimica Inventarios</div>
+              <div style={{ color: "#ccc", fontSize: 11 }}>{inventory.length > 0 ? `${inventory.length} productos cargados` : "Sin inventario"}</div>
+            </div>
+          </div>
+          <div style={{ height: 380, overflowY: "auto", padding: 16 }}>
+            {messages.map((m, i) => <WhatsAppBubble key={i} msg={m} />)}
+            {loading && <div style={{ padding: "8px 14px", borderRadius: "0 12px 12px 12px", background: "#fff", border: "0.5px solid #e0e0e0", fontSize: 13, color: "#888", display: "inline-block" }}>Buscando...</div>}
+            <div ref={chatEndRef} />
+          </div>
+          <div style={{ background: "#F0F0F0", padding: "8px 12px", display: "flex", gap: 8, alignItems: "center" }}>
+            <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendMessage()} placeholder="Escribe tu consulta..." style={{ flex: 1, border: "none", borderRadius: 20, padding: "8px 14px", fontSize: 13, outline: "none", background: "#fff" }} />
+            <button onClick={sendMessage} style={{ width: 38, height: 38, borderRadius: "50%", background: "#25D366", border: "none", cursor: "pointer", color: "#fff", fontSize: 16 }}>&#9658;</button>
+          </div>
+        </div>
+      )}
+
+      {tab === "inventory" && (
+        <div>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar en inventario..." style={{ width: "100%", marginBottom: 12, borderRadius: 8, border: "0.5px solid #ccc", padding: "8px 12px", fontSize: 13, boxSizing: "border-box" }} />
+          {inventory.length === 0 ? (
+            <div style={{ padding: "3rem", textAlign: "center", color: "#888", fontSize: 13, border: "0.5px solid #eee", borderRadius: 12 }}>No hay inventario cargado. Sube un archivo CSV para comenzar.</div>
+          ) : (
+            <div style={{ overflowX: "auto", borderRadius: 12, border: "0.5px solid #eee" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: "#f9f9f9" }}>
+                    {columns.map(c => <th key={c} style={{ padding: "8px 12px", textAlign: "left", fontWeight: 500, color: "#666", borderBottom: "0.5px solid #eee", whiteSpace: "nowrap" }}>{c}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.slice(0, 1000).map((row, i) => (
+                    <tr key={i} style={{ borderBottom: "0.5px solid #f0f0f0" }}>
+                      {columns.map(c => <td key={c} style={{ padding: "7px 12px", color: "#333", whiteSpace: "nowrap" }}>{String(row[c] ?? "")}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {filtered.length > 1000 && <div style={{ padding: "8px 12px", fontSize: 12, color: "#888" }}>Mostrando 1,000 de {filtered.length} — usa el buscador para filtrar</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
