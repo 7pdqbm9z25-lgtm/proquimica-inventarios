@@ -1,0 +1,11 @@
+proquimica-inventarios/
+├── api/chat.js
+├── public/manifest.json
+├── public/sw.js
+├── public/icon-192.png  ← pon el logo de Proquimica aquí
+├── public/icon-512.png  ← mismo logo más grande
+├── src/App.jsx
+├── src/main.jsx
+├── index.html
+├── package.json
+└── vite.config.js
